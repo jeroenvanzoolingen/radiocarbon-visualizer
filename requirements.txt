@@ -4,4 +4,6 @@ plotly
 pdfplumber
 reportlab
 openpyxl
+kaleido
+
 
