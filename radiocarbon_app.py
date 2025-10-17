@@ -165,9 +165,29 @@ if not data.empty:
         mime="text/csv"
     )
 
-    if fig is not None:
-        # Export PNG
-        png_bytes = pio.to_image(fig, format="png", scale=3)
+import os
+
+# Detect if running on Streamlit Cloud
+running_cloud = os.environ.get("STREAMLIT_RUNTIME", "") == "cloud"
+
+if fig is not None and not running_cloud:
+    # Exportfuncties werken alleen lokaal (niet op Streamlit Cloud)
+    png_bytes = pio.to_image(fig, format="png", scale=3)
+    st.download_button(
+        label="🖼️ Download grafiek als PNG",
+        data=png_bytes,
+        file_name="radiocarbon_plot.png",
+        mime="image/png"
+    )
+
+    svg_bytes = pio.to_image(fig, format="svg")
+    st.download_button(
+        label="🧩 Download grafiek als SVG (vector)",
+        data=svg_bytes,
+        file_name="radiocarbon_plot.svg",
+        mime="image/svg+xml"
+    )
+
         st.download_button(
             label="🖼️ Download grafiek als PNG",
             data=png_bytes,
@@ -206,3 +226,4 @@ st.markdown("""
 🧪 *Toekomstige uitbreiding:* echte OxCal-kalibratie (vervangt de gesimuleerde intervallen)  
 Nu ook export in PNG, SVG (vector) en PDF-formaat.
 """)
+
