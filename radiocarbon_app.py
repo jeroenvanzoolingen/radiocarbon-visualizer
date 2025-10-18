@@ -171,7 +171,7 @@ import os
 running_cloud = os.environ.get("STREAMLIT_RUNTIME", "") == "cloud"
 
 if fig is not None and not running_cloud:
-    # Exportfuncties werken alleen lokaal (niet op Streamlit Cloud)
+    # Exportfuncties alleen lokaal beschikbaar
     png_bytes = pio.to_image(fig, format="png", scale=3)
     st.download_button(
         label="🖼️ Download grafiek als PNG",
@@ -226,4 +226,5 @@ st.markdown("""
 🧪 *Toekomstige uitbreiding:* echte OxCal-kalibratie (vervangt de gesimuleerde intervallen)  
 Nu ook export in PNG, SVG (vector) en PDF-formaat.
 """)
+
 
