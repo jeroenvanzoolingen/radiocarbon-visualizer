@@ -5,6 +5,7 @@ import pdfplumber
 import plotly.graph_objects as go
 import plotly.io as pio
 import io
+import os
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
@@ -165,29 +166,12 @@ if not data.empty:
         mime="text/csv"
     )
 
-import os
+    # Detecteer of de app in Streamlit Cloud draait
+    running_cloud = os.environ.get("STREAMLIT_RUNTIME", "") == "cloud"
 
-# Detect if running on Streamlit Cloud
-running_cloud = os.environ.get("STREAMLIT_RUNTIME", "") == "cloud"
-
-if fig is not None and not running_cloud:
-    # Exportfuncties alleen lokaal beschikbaar
-    png_bytes = pio.to_image(fig, format="png", scale=3)
-    st.download_button(
-        label="🖼️ Download grafiek als PNG",
-        data=png_bytes,
-        file_name="radiocarbon_plot.png",
-        mime="image/png"
-    )
-
-    svg_bytes = pio.to_image(fig, format="svg")
-    st.download_button(
-        label="🧩 Download grafiek als SVG (vector)",
-        data=svg_bytes,
-        file_name="radiocarbon_plot.svg",
-        mime="image/svg+xml"
-    )
-
+    if fig is not None and not running_cloud:
+        # Exportfuncties alleen lokaal beschikbaar
+        png_bytes = pio.to_image(fig, format="png", scale=3)
         st.download_button(
             label="🖼️ Download grafiek als PNG",
             data=png_bytes,
@@ -195,7 +179,6 @@ if fig is not None and not running_cloud:
             mime="image/png"
         )
 
-        # Export SVG (vector)
         svg_bytes = pio.to_image(fig, format="svg")
         st.download_button(
             label="🧩 Download grafiek als SVG (vector)",
@@ -204,27 +187,8 @@ if fig is not None and not running_cloud:
             mime="image/svg+xml"
         )
 
-        # Export PDF (vector via SVG naar PDF)
-        pdf_buffer = io.BytesIO()
-        c = canvas.Canvas(pdf_buffer, pagesize=A4)
-        img = ImageReader(io.BytesIO(pio.to_image(fig, format="png", scale=3)))
-        width, height = A4
-        c.drawImage(img, 50, 200, width-100, height-300, preserveAspectRatio=True)
-        c.showPage()
-        c.save()
-        pdf_buffer.seek(0)
-
-        st.download_button(
-            label="📄 Download grafiek als PDF",
-            data=pdf_buffer,
-            file_name="radiocarbon_plot.pdf",
-            mime="application/pdf"
-        )
-
 st.markdown("""
 ---
 🧪 *Toekomstige uitbreiding:* echte OxCal-kalibratie (vervangt de gesimuleerde intervallen)  
-Nu ook export in PNG, SVG (vector) en PDF-formaat.
+📤 *Opmerking:* grafiek-export is alleen beschikbaar bij lokaal gebruik (niet op Streamlit Cloud).
 """)
-
-
