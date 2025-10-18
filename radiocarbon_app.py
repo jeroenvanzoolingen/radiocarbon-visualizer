@@ -21,7 +21,10 @@ De app combineert alles, toont de data, en maakt een visualisatie van de daterin
 
 # ---------- Hulpfuncties ----------
 def parse_bp_value(value):
-    match = re.match(r"(\d+)\s*[±\+-]\s*(\d+)", str(value))
+    """Herken diverse notaties zoals ±, +-, en +/-"""
+    if not value:
+        return None, None
+    match = re.match(r"(\\d+)\\s*[±\\+\\-/]*\\s*(\\d+)", str(value))
     if match:
         bp = int(match.group(1))
         error = int(match.group(2))
@@ -33,9 +36,9 @@ def parse_pdf(file):
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
             if page.extract_text():
-                text += page.extract_text() + "\n"
+                text += page.extract_text() + "\\n"
 
-    pattern = re.compile(r"(\S+)\s+(\S+)\s+(\d+\s*[±\+-]\s*\d+)\s*BP", re.IGNORECASE)
+    pattern = re.compile(r"(\\S+)\\s+(\\S+)\\s+(\\d+\\s*[±\\+-]\\s*\\d+)\\s*BP", re.IGNORECASE)
     rows = []
     for m in pattern.finditer(text):
         rows.append({
@@ -92,20 +95,23 @@ with st.form("manual_entry"):
 
     if add and sample and lab and raw_date:
         bp, err = parse_bp_value(raw_date)
-        cal = simulate_calibration(bp, err)
-        new_row = pd.DataFrame([{
-            "Sample name": sample,
-            "Lab. no.": lab,
-            "14C date (BP)": raw_date,
-            "BP": bp,
-            "Error": err,
-            "Cal68_from": cal["Cal68_from"],
-            "Cal68_to": cal["Cal68_to"],
-            "Cal95_from": cal["Cal95_from"],
-            "Cal95_to": cal["Cal95_to"],
-            "Calibrated (cal BP or BC/AD)": ""
-        }])
-        data = pd.concat([data, new_row], ignore_index=True)
+        if bp is None or err is None:
+            st.warning("❗ Ongeldige invoer — gebruik bijvoorbeeld: 510 ± 30 BP")
+        else:
+            cal = simulate_calibration(bp, err)
+            new_row = pd.DataFrame([{
+                "Sample name": sample,
+                "Lab. no.": lab,
+                "14C date (BP)": raw_date,
+                "BP": bp,
+                "Error": err,
+                "Cal68_from": cal["Cal68_from"],
+                "Cal68_to": cal["Cal68_to"],
+                "Cal95_from": cal["Cal95_from"],
+                "Cal95_to": cal["Cal95_to"],
+                "Calibrated (cal BP or BC/AD)": ""
+            }])
+            data = pd.concat([data, new_row], ignore_index=True)
 
 # ---------- Dataset tonen ----------
 st.subheader("📋 Samengestelde dataset")
@@ -189,6 +195,6 @@ if not data.empty:
 
 st.markdown("""
 ---
-🧪 *Toekomstige uitbreiding:* echte OxCal-kalibratie (vervangt de gesimuleerde intervallen)  
-📤 *Opmerking:* grafiek-export is alleen beschikbaar bij lokaal gebruik (niet op Streamlit Cloud).
+🧪 *Toekomstige uitbreiding:* echte OxCal-kalibratie (vervangt de gesimuleerde intervallen)*  
+📤 *Opmerking:* grafiek-export is alleen beschikbaar bij lokaal gebruik (niet op Streamlit Cloud).*
 """)
