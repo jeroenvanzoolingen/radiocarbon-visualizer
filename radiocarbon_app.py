@@ -3,12 +3,7 @@ import pandas as pd
 import re
 import pdfplumber
 import plotly.graph_objects as go
-import plotly.io as pio
-import io
 import os
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.utils import ImageReader
 
 st.set_page_config(page_title="Radiocarbon Visualizer", layout="wide")
 
@@ -76,9 +71,8 @@ if uploaded_file is not None:
     df["BP"], df["Error"] = zip(*df["14C date (BP)"].map(parse_bp_value))
     df["Calibrated (cal BP or BC/AD)"] = ""
 
-    # voorlopige kalibratie
     cals = df.apply(lambda r: simulate_calibration(r["BP"], r["Error"]), axis=1)
-    for i, c in enumerate(["Cal68_from", "Cal68_to", "Cal95_from", "Cal95_to"]):
+    for c in ["Cal68_from", "Cal68_to", "Cal95_from", "Cal95_to"]:
         df[c] = [d[c] if d else None for d in cals]
 
     data = pd.concat([data, df], ignore_index=True)
@@ -118,7 +112,6 @@ st.subheader("📋 Samengestelde dataset")
 st.dataframe(data, use_container_width=True)
 
 # ---------- Visualisatie ----------
-fig = None
 if not data.empty and "BP" in data:
     st.subheader("📊 Visualisatie (gesimuleerde intervallen)")
 
@@ -127,7 +120,6 @@ if not data.empty and "BP" in data:
     for idx, row in data.iterrows():
         if pd.notna(row["BP"]) and pd.notna(row["Error"]):
             y = row["Sample name"]
-            # 95% interval
             fig.add_trace(go.Scatter(
                 x=[row["Cal95_from"], row["Cal95_to"]],
                 y=[y, y],
@@ -135,7 +127,6 @@ if not data.empty and "BP" in data:
                 line=dict(color="rgba(150,150,150,0.6)", width=6),
                 name="95%"
             ))
-            # 68% interval
             fig.add_trace(go.Scatter(
                 x=[row["Cal68_from"], row["Cal68_to"]],
                 y=[y, y],
@@ -143,7 +134,6 @@ if not data.empty and "BP" in data:
                 line=dict(color="rgba(50,50,200,0.9)", width=10),
                 name="68%"
             ))
-            # Marker voor BP
             fig.add_trace(go.Scatter(
                 x=[row["BP"]],
                 y=[y],
@@ -162,7 +152,7 @@ if not data.empty and "BP" in data:
 
     st.plotly_chart(fig, use_container_width=True)
 
-# ---------- Exporteerfuncties ----------
+# ---------- CSV-export ----------
 if not data.empty:
     csv = data.to_csv(index=False).encode("utf-8")
     st.download_button(
@@ -172,29 +162,7 @@ if not data.empty:
         mime="text/csv"
     )
 
-    # Detecteer of de app in Streamlit Cloud draait
-    running_cloud = os.environ.get("STREAMLIT_RUNTIME", "") == "cloud"
-
-    if running_cloud:
-        st.info("💡 Grafiek-export (PNG/SVG) is uitgeschakeld in Streamlit Cloud. "
-                "Download werkt wel bij lokaal gebruik.")
-    else:
-        # Exportfuncties alleen lokaal beschikbaar
-        png_bytes = pio.to_image(fig, format="png", scale=3)
-        st.download_button(
-            label="🖼️ Download grafiek als PNG",
-            data=png_bytes,
-            file_name="radiocarbon_plot.png",
-            mime="image/png"
-        )
-
-        svg_bytes = pio.to_image(fig, format="svg")
-        st.download_button(
-            label="🧩 Download grafiek als SVG (vector)",
-            data=svg_bytes,
-            file_name="radiocarbon_plot.svg",
-            mime="image/svg+xml"
-        )
+st.info("💡 Grafiek-export (PNG/SVG) werkt alleen bij lokaal gebruik; op Streamlit Cloud is dit uitgeschakeld.")
 
 st.markdown("""
 ---
