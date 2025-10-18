@@ -24,7 +24,6 @@ def parse_bp_value(value):
     """Herken diverse notaties zoals ±, +-, en +/-"""
     if not value:
         return None, None
-    # ✅ Eenvoudige regex-fix — werkt correct in Python
     match = re.match(r"(\d+)\s*[±+\-/]*\s*(\d+)", str(value))
     if match:
         bp = int(match.group(1))
@@ -176,7 +175,10 @@ if not data.empty:
     # Detecteer of de app in Streamlit Cloud draait
     running_cloud = os.environ.get("STREAMLIT_RUNTIME", "") == "cloud"
 
-    if fig is not None and not running_cloud:
+    if running_cloud:
+        st.info("💡 Grafiek-export (PNG/SVG) is uitgeschakeld in Streamlit Cloud. "
+                "Download werkt wel bij lokaal gebruik.")
+    else:
         # Exportfuncties alleen lokaal beschikbaar
         png_bytes = pio.to_image(fig, format="png", scale=3)
         st.download_button(
