@@ -24,7 +24,8 @@ def parse_bp_value(value):
     """Herken diverse notaties zoals ±, +-, en +/-"""
     if not value:
         return None, None
-    match = re.match(r"(\\d+)\\s*[±\\+\\-/]*\\s*(\\d+)", str(value))
+    # ✅ Eenvoudige regex-fix — werkt correct in Python
+    match = re.match(r"(\d+)\s*[±+\-/]*\s*(\d+)", str(value))
     if match:
         bp = int(match.group(1))
         error = int(match.group(2))
@@ -36,9 +37,9 @@ def parse_pdf(file):
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
             if page.extract_text():
-                text += page.extract_text() + "\\n"
+                text += page.extract_text() + "\n"
 
-    pattern = re.compile(r"(\\S+)\\s+(\\S+)\\s+(\\d+\\s*[±\\+-]\\s*\\d+)\\s*BP", re.IGNORECASE)
+    pattern = re.compile(r"(\S+)\s+(\S+)\s+(\d+\s*[±\+-]\s*\d+)\s*BP", re.IGNORECASE)
     rows = []
     for m in pattern.finditer(text):
         rows.append({
