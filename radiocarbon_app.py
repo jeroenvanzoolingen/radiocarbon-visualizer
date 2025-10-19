@@ -7,16 +7,15 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="Radiocarbon Visualizer – OxCal-stijl", layout="wide")
 
-st.title("📆 Radiocarbon Dating Visualizer met IntCal-kalibratie")
+st.title("📆 Radiocarbon Dating Visualizer met IntCal-kalibratie (BC/AD-tijdas)")
 st.markdown("""
 Upload je data (Excel of PDF) of voer handmatig waarden in.  
-De app toont de **IntCal-kalibratiecurve** (blauw) en de **gekalibreerde waarschijnlijkheidsverdelingen**
-voor elk monster (OxCal-stijl “wiggly lines”).
+De app toont de **IntCal20-kalibratiecurve** (blauw) en de **gekalibreerde waarschijnlijkheidsverdelingen**
+voor elk monster, met een BC/AD-tijdas in stappen van 100 jaar.
 """)
 
 # ---------- Parsing helpers ----------
 def parse_bp_value(value):
-    """Herken notaties zoals '510 ± 30' of '510+/-30'."""
     if not value:
         return None, None
     match = re.match(r"(\d+)\s*[±+\-/]*\s*(\d+)", str(value))
@@ -44,22 +43,32 @@ def parse_pdf(file):
 @st.cache_data
 def load_intcal_curve(path="intcal20.csv"):
     df = pd.read_csv(path)
-    df = df.sort_values("calBP")           # garandeer monotone stijging in calBP
-    df = df.reset_index(drop=True)
+    df = df.sort_values("calBP").reset_index(drop=True)
     return df
 
 intcal_df = load_intcal_curve()
 
 # ---------- Posteriorberekening ----------
 def calibrate_posterior(bp_measured, sigma_lab, intcal_df):
-    """Bereken posterior p(t) over kalenderjaren (calBP) gegeven 14C-meting."""
     mu = intcal_df["mu14C"].values
     sigma_curve = intcal_df["sigma_curve"].values
     calBP = intcal_df["calBP"].values
     var = sigma_curve**2 + sigma_lab**2
     L = np.exp(-0.5 * (bp_measured - mu)**2 / var) / np.sqrt(2 * np.pi * var)
-    posterior = L / np.trapz(L, calBP)  # normaliseer over calBP
+    posterior = L / np.trapz(L, calBP)
     return calBP, posterior
+
+# ---------- Helper: BP→AD (BC/AD) ----------
+def bp_to_ad(bp_values):
+    return 1950 - np.array(bp_values)
+
+def format_bc_ad(ad_year):
+    if ad_year < 0:
+        return f"{abs(int(ad_year))} BC"
+    elif ad_year == 0:
+        return "0 AD"
+    else:
+        return f"{int(ad_year)} AD"
 
 # ---------- Upload & invoer ----------
 uploaded_file = st.file_uploader("📄 Upload Excel- of PDF-bestand", type=["xlsx", "xls", "pdf"])
@@ -99,52 +108,59 @@ if not data.empty:
 
     fig = go.Figure()
 
-    # ---- IntCal-curve (blauwe band ±1σ) ----
-    calBP = intcal_df["calBP"]
-    mu = intcal_df["mu14C"]
-    sigma = intcal_df["sigma_curve"]
+    # ---- IntCal-curve ----
+    calBP = intcal_df["calBP"].values
+    AD_years = bp_to_ad(calBP)
+    mu = intcal_df["mu14C"].values
+    sigma = intcal_df["sigma_curve"].values
 
     fig.add_trace(go.Scatter(
-        x=calBP, y=mu + sigma,
-        line=dict(color="rgba(0,0,255,0)"),
-        hoverinfo="skip", showlegend=False
+        x=AD_years, y=mu + sigma,
+        line=dict(color="rgba(0,0,255,0)"), hoverinfo="skip", showlegend=False
     ))
     fig.add_trace(go.Scatter(
-        x=calBP, y=mu - sigma,
+        x=AD_years, y=mu - sigma,
         fill="tonexty",
         fillcolor="rgba(0,100,255,0.25)",
         line=dict(color="rgba(0,0,255,0)"),
         name="IntCal20 ±1σ"
     ))
     fig.add_trace(go.Scatter(
-        x=calBP, y=mu,
+        x=AD_years, y=mu,
         line=dict(color="blue", width=1),
         name="IntCal20 μ(¹⁴C)"
     ))
 
     # ---- Posterior-wiggles per sample ----
-    offset_step = (mu.max() - mu.min()) * 0.15  # verticale afstand tussen curves
+    offset_step = (mu.max() - mu.min()) * 0.15
     for idx, row in data.iterrows():
         if pd.notna(row["BP"]) and pd.notna(row["Error"]):
             cal_grid, post = calibrate_posterior(row["BP"], row["Error"], intcal_df)
+            ad_grid = bp_to_ad(cal_grid)
             post_scaled = post / post.max() * offset_step
             offset = mu.min() - (idx + 1) * offset_step * 1.4
             fig.add_trace(go.Scatter(
-                x=cal_grid,
+                x=ad_grid,
                 y=post_scaled + offset,
                 mode="lines",
                 line=dict(width=2),
                 name=row["Sample name"]
             ))
 
+    # ---- Bereken as-limieten en ticks ----
+    ad_min = 1950 - intcal_df["calBP"].max() - 50
+    ad_max = 1950 + 50
+    tick_vals = np.arange(ad_min // 100 * 100, ad_max + 100, 100)
+    tick_texts = [format_bc_ad(y) for y in tick_vals]
+
     # ---- Layout ----
     fig.update_layout(
         xaxis=dict(
-            title="Kalenderjaren (cal BP)",
-            autorange="reversed",        # verleden links
-            range=[6000, 0],
-            tickmode="linear",
-            dtick=500
+            title="Kalenderjaren (BC/AD)",
+            range=[ad_min, ad_max],
+            tickmode="array",
+            tickvals=tick_vals,
+            ticktext=tick_texts
         ),
         yaxis=dict(
             title="14C-waarde (BP) en posterior-dichtheid",
@@ -165,6 +181,6 @@ if not data.empty:
 
 st.markdown("""
 ---
-🧪 *Deze versie berekent echte posterior-dichtheden (OxCal-stijl) uit de IntCal20-curve.*  
-📈 *De IntCal-band is strak en monotoon; de “wiggly” lijnen tonen de kansdichtheid per monster.*
+🧪 *De tijdas toont nu kalenderjaren (BC/AD) in stappen van 100 jaar,  
+met ±50 jaar marge voor een prettigere layout.*
 """)
