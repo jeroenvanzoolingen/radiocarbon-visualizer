@@ -1,9 +1,6 @@
 streamlit
 pandas
+numpy
 plotly
 pdfplumber
-reportlab
 openpyxl
-kaleido
-
-
