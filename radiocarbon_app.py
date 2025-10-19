@@ -1,299 +1,303 @@
-# radiocarbon_app.py
-import streamlit as st
-import pandas as pd
-import numpy as np
-import re
-import pdfplumber
-import plotly.graph_objects as go
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
+# app.py
 import io
-import tempfile
-import os
-from datetime import datetime
+import re
+from math import ceil
+from typing import List, Tuple
 
-st.set_page_config(page_title="Radiocarbon Visualizer (stabiel)", layout="wide")
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-st.title("📆 Radiocarbon Visualizer — gebruik 'Gekalibreerd (2σ)' voor x-as")
-st.markdown("Upload Excel/PDF met kolom `Gekalibreerd (2σ)` of vul handmatig in. De app tekent de kalibratieranges en de IntCal ±2σ band.")
+# ---------- Helpers: parse calibrated range strings ----------
 
-# ---------------- helpers ----------------
-def parse_bp_value(value):
-    if not value or (isinstance(value, float) and np.isnan(value)):
-        return None, None
-    match = re.match(r"(\d+)\s*[±+\-/]*\s*(\d+)", str(value))
-    if match:
-        return int(match.group(1)), int(match.group(2))
-    return None, None
+def parse_calibrated_range(text: str) -> Tuple[int, int]:
+    """
+    Parse a variety of human-written calibrated ranges into (startYear, endYear).
+    We return years in astronomical CE: CE positive (e.g. 2025), BCE negative (e.g. -600 for 600 BCE).
+    Accepts forms like:
+      - "600 BC - 500 BC", "600 BCE - 500 BCE"
+      - "400-350 BCE"
+      - "250 CE - 300 CE", "250 AD - 300 AD"
+      - "100 BC – 1 AD"
+      - "400 BC - 200 CE"
+      - "200 BCE - 150 BCE"
+      - "1500 - 1400 BC"
+    If parsing fails raise ValueError.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Empty range")
 
-def parse_pdf(file):
-    text = ""
-    with pdfplumber.open(file) as pdf:
-        for page in pdf.pages:
-            if page.extract_text():
-                text += page.extract_text() + "\n"
-    pattern = re.compile(r"(\S+)\s+(\S+)\s+(\d+\s*[±\+-]\s*\d+)\s*BP", re.IGNORECASE)
-    rows = []
-    for m in pattern.finditer(text):
-        rows.append({"Sample name": m.group(1), "Lab. no.": m.group(2), "14C date (BP)": m.group(3) + " BP"})
-    return pd.DataFrame(rows)
+    # Normalize punctuation
+    s = text.replace("–", "-").replace("—", "-").replace("—", "-")
+    # Try to capture two numbers and optional era indicators
+    # Patterns: number (era?) [sep] number (era?)
+    m = re.search(r'(-?\d+)\s*(BCE|BC|CE|AD|B\.C\.E\.|B\.C\.|A\.D\.)?\s*[-–]\s*(-?\d+)\s*(BCE|BC|CE|AD|B\.C\.E\.|B\.C\.|A\.D\.)?', s, flags=re.IGNORECASE)
+    if not m:
+        # If only single year provided treat as tiny range of ±0
+        m2 = re.search(r'(-?\d+)\s*(BCE|BC|CE|AD)?', s, flags=re.IGNORECASE)
+        if m2:
+            val = int(m2.group(1))
+            era = (m2.group(2) or "").upper()
+            num = val * (-1 if "B" in era else 1) if era else int(val)
+            return num, num
+        raise ValueError(f"Kan range niet parsen: '{text}'")
 
-def parse_calibrated_range(val):
-    """Return (start_AD, end_AD) integers or (None,None). Supports multiple notations."""
-    if pd.isna(val):
-        return None, None
-    s = str(val).strip()
-    s = s.replace("–", "-").replace("—", "-").replace(" to ", "-").replace("TO", "-")
-    s = re.sub(r"\(.*?\)", "", s)
-    # Find tokens like "393 BC" or "70 AD" or just numbers
-    tokens = re.findall(r"(-?\d+)\s*(BC|BCE|AD|CE)?", s, flags=re.IGNORECASE)
-    def to_ad(token):
-        num_str, era = token
-        num = int(num_str)
-        if era and era.upper() in ("BC", "BCE"):
-            return -abs(num)
-        return num
-    if len(tokens) >= 2:
-        a = to_ad(tokens[0]); b = to_ad(tokens[1])
-        return (a, b) if a <= b else (b, a)
-    # fallback: split on '-' and attempt to parse
-    if "-" in s:
-        parts = s.split("-")
-        def parse_part(p):
-            m = re.search(r"(-?\d+)", p)
-            if not m:
-                return None
-            num = int(m.group(1))
-            if re.search(r"BC|BCE", p, flags=re.IGNORECASE):
-                return -abs(num)
-            return num
-        p0 = parse_part(parts[0]); p1 = parse_part(parts[1])
-        if p0 is not None and p1 is not None:
-            return (p0, p1) if p0 <= p1 else (p1, p0)
-    return None, None
+    a_num, a_era, b_num, b_era = m.group(1), m.group(2), m.group(3), m.group(4)
+    def to_year(n_str, era):
+        n = int(n_str)
+        era = (era or "").upper() if era else ""
+        # If era mentions BC/BCE -> negative year. AD/CE -> positive. If era absent assume CE if value > 50? but safer: assume positive (CE)
+        if "B" in era:
+            return -abs(n)
+        return n  # CE/AD or none -> positive
+    y1 = to_year(a_num, a_era)
+    y2 = to_year(b_num, b_era)
+    # normalize order: start <= end (older -> younger). For BCE negative numbers smaller means older; e.g., -600 < -500
+    start = min(y1, y2)
+    end = max(y1, y2)
+    return start, end
 
-def format_bc_ad(y):
-    if y < 0:
-        return f"{abs(int(y))} BC"
-    elif y == 0:
-        return "0 AD"
+# ---------- UI / App ----------
+
+st.set_page_config(page_title="Calibrated ranges → OxCal-like plot", layout="wide")
+
+st.title("Gekalibreerde dateringen (2σ) — grafiek en export")
+st.markdown(
+    "Voer handmatig records in of upload een Excel met kolommen: "
+    "`Sample name`, `Lab.no.`, `14C date (BP)`, `1σ`, `Calibrated date (2σ)`, `Context`."
+)
+
+# --- Left pane: input table and upload ---
+with st.sidebar:
+    st.header("Invoer")
+    uploaded = st.file_uploader("Upload Excel (.xlsx/.xls) met kolommen zoals hierboven", type=["xlsx", "xls"])
+    if uploaded is not None:
+        try:
+            df_in = pd.read_excel(uploaded, engine="openpyxl")
+            # Standardize column names
+            # Accept various column name variants
+            col_map = {}
+            for c in df_in.columns:
+                cc = c.strip().lower()
+                if "sample" in cc and "name" in cc:
+                    col_map[c] = "Sample name"
+                elif "lab" in cc:
+                    col_map[c] = "Lab.no."
+                elif "14c" in cc or "14c date" in cc or "radiocarbon" in cc:
+                    col_map[c] = "14C date (BP)"
+                elif "1σ" in cc or "1s" in cc or "sigma" in cc:
+                    col_map[c] = "1σ"
+                elif "calibr" in cc and "2" in cc:
+                    col_map[c] = "Calibrated date (2σ)"
+                elif "context" in cc:
+                    col_map[c] = "Context"
+            df_in = df_in.rename(columns=col_map)
+            # Keep only requested columns and add missing
+            cols = ["Sample name", "Lab.no.", "14C date (BP)", "1σ", "Calibrated date (2σ)", "Context"]
+            for c in cols:
+                if c not in df_in.columns:
+                    df_in[c] = ""
+            df = df_in[cols].copy()
+            st.success(f"{len(df)} rijen ingelezen uit Excel")
+        except Exception as e:
+            st.error(f"Kon Excel niet inlezen: {e}")
+            df = pd.DataFrame(columns=["Sample name", "Lab.no.", "14C date (BP)", "1σ", "Calibrated date (2σ)", "Context"])
     else:
-        return f"{int(y)} AD"
+        # start empty table with one example row
+        df = pd.DataFrame([{
+            "Sample name": "",
+            "Lab.no.": "",
+            "14C date (BP)": "",
+            "1σ": "",
+            "Calibrated date (2σ)": "",
+            "Context": ""
+        }])
 
-# ---------------- IntCal (local file) ----------------
-@st.cache_data
-def load_intcal_local(path="intcal20.csv"):
-    # Expect that intcal20.csv is in repo root
-    df = pd.read_csv(path)
-    df = df.sort_values("calBP").reset_index(drop=True)
-    # smooth to avoid visual gaps
-    df["mu14C_smooth"] = df["mu14C"].rolling(window=50, center=True, min_periods=1).mean()
-    df["sigma_smooth"] = df["sigma_curve"].rolling(window=50, center=True, min_periods=1).mean()
-    df["calAD"] = 1950 - df["calBP"]
-    return df
+    st.write("Bewerk de rijen direct (klik op cel). Voeg rijen toe met de knop.")
+    edited = st.experimental_data_editor(df, num_rows="dynamic")
+    if edited is None:
+        edited = df.copy()
 
-try:
-    intcal_df = load_intcal_local()
-except FileNotFoundError:
-    st.error("intcal20.csv niet gevonden in de repo root. Upload het bestand 'intcal20.csv' in de projectmap.")
-    st.stop()
+    if st.button("Voeg lege rij toe"):
+        edited = pd.concat([edited, pd.DataFrame([{
+            "Sample name": "",
+            "Lab.no.": "",
+            "14C date (BP)": "",
+            "1σ": "",
+            "Calibrated date (2σ)": "",
+            "Context": ""
+        }])], ignore_index=True)
+        st.experimental_rerun()
 
-# ---------------- session dataset ----------------
-if "data" not in st.session_state:
-    st.session_state["data"] = pd.DataFrame(columns=["Sample name","Lab. no.","14C date (BP)","BP","Error","Gekalibreerd (2σ)"])
+    st.markdown("---")
+    st.write("Plot opties")
+    max_margin_years = st.number_input("Max marge rondom uiterste dateringen (jaar)", value=50, min_value=0, step=1)
+    bin_step = st.number_input("Tick stapel op x-as (jaar)", value=100, min_value=1, step=1)
+    st.markdown("---")
+    generate = st.button("Genereer grafiek en APD")
 
-# ---------------- upload / append ----------------
-uploaded_file = st.file_uploader("Upload Excel of PDF", type=["xlsx","xls","pdf"])
-if uploaded_file is not None:
-    if uploaded_file.name.lower().endswith(".pdf"):
-        df = parse_pdf(uploaded_file)
+# Main area: show table + generated plot
+st.subheader("Ingevoerde records")
+st.dataframe(edited, use_container_width=True)
+
+# Prepare parsed intervals if generate clicked or automatic
+if 'generate' not in locals():
+    generate = False
+
+if generate:
+    df2 = edited.copy()
+    parsed = []
+    errors = []
+    for idx, row in df2.iterrows():
+        rng_text = str(row.get("Calibrated date (2σ)", "")).strip()
+        if not rng_text:
+            errors.append(f"Rij {idx+1} ('{row.get('Sample name','')}'): geen calibrated range opgegeven.")
+            continue
+        try:
+            start, end = parse_calibrated_range(rng_text)
+            parsed.append({
+                "Sample name": str(row.get("Sample name", "")),
+                "Lab.no.": str(row.get("Lab.no.", "")),
+                "14C date (BP)": row.get("14C date (BP)", ""),
+                "1σ": row.get("1σ", ""),
+                "cal_start": start,
+                "cal_end": end,
+                "Context": row.get("Context", ""),
+                "raw_range": rng_text
+            })
+        except Exception as e:
+            errors.append(f"Rij {idx+1} ('{row.get('Sample name','')}'): kon range niet parsen: {e}")
+
+    if len(parsed) == 0:
+        st.error("Geen geldige gekalibreerde ranges gevonden. Zie fouten hieronder.")
+        for e in errors:
+            st.write("- " + e)
     else:
-        df = pd.read_excel(uploaded_file)
-    if "14C date (BP)" in df.columns:
-        df["BP"], df["Error"] = zip(*df["14C date (BP)"].map(parse_bp_value))
-    if "Gekalibreerd (2σ)" not in df.columns:
-        df["Gekalibreerd (2σ)"] = None
-    st.session_state["data"] = pd.concat([st.session_state["data"], df], ignore_index=True)
+        pdf_buf = None
+        # Create dataframe of parsed intervals
+        parsed_df = pd.DataFrame(parsed)
+        # sort by mean age descending = oldest first on top
+        parsed_df["mean"] = (parsed_df["cal_start"] + parsed_df["cal_end"]) / 2
+        parsed_df = parsed_df.sort_values("mean")  # ascending: more negative (older) first
+        parsed_df = parsed_df.reset_index(drop=True)
 
-# ---------------- manual multiple input ----------------
-st.subheader("Handmatige invoer (meerdere regels mogelijk)")
-with st.form("manual", clear_on_submit=True):
-    c1,c2,c3,c4 = st.columns([2,2,2,3])
-    sample = c1.text_input("Sample name")
-    lab = c2.text_input("Lab. no.")
-    raw_bp = c3.text_input("14C date (BP)", placeholder="bijv. 510 ± 30")
-    calib = c4.text_input("Gekalibreerd (2σ) (optioneel)", placeholder="bijv. 393 BC - 70 AD")
-    submit = st.form_submit_button("Voeg toe")
-    if submit:
-        bp, err = parse_bp_value(raw_bp)
-        new = {"Sample name": sample or "", "Lab. no.": lab or "", "14C date (BP)": raw_bp or "",
-               "BP": bp, "Error": err, "Gekalibreerd (2σ)": calib or None}
-        st.session_state["data"] = pd.concat([st.session_state["data"], pd.DataFrame([new])], ignore_index=True)
+        # Build Plotly horizontal bars: we want older at top -> so y categories in order of parsed_df
+        y_names = parsed_df["Sample name"].fillna("").astype(str).tolist()
 
-data = st.session_state["data"]
-st.subheader("Samengestelde dataset")
-st.dataframe(data, use_container_width=True)
+        # Convert starts/ends to numeric timeline for plotting (CE positive, BCE negative)
+        starts = parsed_df["cal_start"].tolist()
+        ends = parsed_df["cal_end"].tolist()
+        # x-domain margin: compute min start and max end and add margins (in years)
+        min_start = min(starts)
+        max_end = max(ends)
+        x_min = min_start - max_margin_years
+        x_max = max_end + max_margin_years
 
-# ---------------- prepare plotting ranges ----------------
-show_intcal = st.checkbox("Toon IntCal ±2σ-band", value=True)
-
-# parse calibrated ranges
-cal_ranges = []
-for i,row in data.iterrows():
-    rng = None
-    if "Gekalibreerd (2σ)" in data.columns:
-        rng = parse_calibrated_range(row.get("Gekalibreerd (2σ)"))
-    cal_ranges.append(rng)
-
-# determine x limits: prefer calibrated ranges if any valid, else IntCal full extent
-valid_ranges = [r for r in cal_ranges if r and r[0] is not None]
-if valid_ranges:
-    min_ad = min(r[0] for r in valid_ranges)
-    max_ad = max(r[1] for r in valid_ranges)
-else:
-    # fallback to IntCal extents
-    min_ad = intcal_df["calAD"].min()
-    max_ad = intcal_df["calAD"].max()
-
-# add 100 year buffer and round to 100
-left = int(np.floor((min_ad - 100) / 100.0) * 100)
-right = int(np.ceil((max_ad + 100) / 100.0) * 100)
-if left == right:
-    left -= 100
-    right += 100
-tick_vals = np.arange(left, right+100, 100)
-tick_texts = [format_bc_ad(t) for t in tick_vals]
-
-# ---------------- plotting ----------------
-if not data.empty:
-    st.subheader("Visualisatie")
-    fig = go.Figure()
-
-    # IntCal band (smoothed)
-    if show_intcal:
-        ad_vals = intcal_df["calAD"].values
-        upper = intcal_df["mu14C_smooth"].values + 2 * intcal_df["sigma_smooth"].values
-        lower = intcal_df["mu14C_smooth"].values - 2 * intcal_df["sigma_smooth"].values
-        # band
-        fig.add_trace(go.Scatter(x=ad_vals, y=upper, line=dict(color='rgba(0,0,255,0)'), showlegend=False, hoverinfo='skip'))
-        fig.add_trace(go.Scatter(x=ad_vals, y=lower, fill='tonexty', fillcolor='rgba(0,100,255,0.25)',
-                                 line=dict(color='rgba(0,0,255,0)'), name='IntCal20 ±2σ'))
-        # remove central line as requested
-
-    # sample horizontal bars (top-down)
-    n = len(data)
-    y_ticks = []
-    y_labels = []
-    for idx,row in enumerate(data.itertuples(), start=1):
-        y = n - idx + 1  # top-down numbering
-        y_ticks.append(y)
-        samp_label = getattr(row, "Sample_name", f"sample_{idx}")
-        y_labels.append(samp_label)
-        rng = cal_ranges[idx-1] if idx-1 < len(cal_ranges) else None
-        if rng and rng[0] is not None:
-            start_ad, end_ad = rng
-            fig.add_trace(go.Scatter(
-                x=[start_ad, end_ad], y=[y,y], mode='lines', line=dict(color='firebrick', width=10),
-                hoverinfo='text', hovertext=f"{samp_label}: {start_ad} — {end_ad}"
+        # Generate bars: plotly requires numeric widths; we'll use base=starts and x=widths
+        widths = [end - start for start, end in zip(starts, ends)]
+        # Build figure
+        fig = go.Figure()
+        # Each sample as separate barra to preserve ordering and hover
+        for i, name in enumerate(y_names):
+            fig.add_trace(go.Bar(
+                x=[widths[i]],
+                y=[name],
+                base=[starts[i]],
+                orientation='h',
+                marker=dict(color='royalblue', opacity=0.6),
+                hovertemplate=(
+                    f"<b>{name}</b><br>"
+                    f"Range: {parsed_df.loc[i,'raw_range']}<br>"
+                    f"Start: {format_year_label(starts[i])}<br>"
+                    f"End: {format_year_label(ends[i])}<br>"
+                    "<extra></extra>"
+                ),
+                showlegend=False
             ))
-            # sample name as text slightly right
-            fig.add_trace(go.Scatter(x=[end_ad + (right-left)*0.02], y=[y], mode='text', text=[samp_label],
-                                     textposition='middle right', showlegend=False))
-        else:
-            # if no calibrated range, indicate with small marker and label
-            fig.add_trace(go.Scatter(x=[None], y=[y], mode='markers+text', text=[samp_label],
-                                     textposition='middle right', showlegend=False))
 
-    # axes settings: disable range slider and fix y-range to prevent weird interactive widget
-    fig.update_layout(
-        xaxis=dict(title="Kalenderjaren (BC/AD)", range=[left,right], tickmode='array', tickvals=tick_vals,
-                   ticktext=tick_texts, rangeslider=dict(visible=False)),
-        yaxis=dict(title="", tickmode='array', tickvals=y_ticks, ticktext=y_labels, autorange='reversed',
-                   fixedrange=True),
-        height=180 + 60*n,
-        template="simple_white",
-        showlegend=True
-    )
+        # X ticks: choose step bin_step (from sidebar)
+        def yr_labels(minv, maxv, step):
+            # generate tick positions as integers covering the domain
+            # ensure nice round ticks e.g., multiples of step
+            lo = int(ceil(minv / step) * step)
+            ticks = list(range(lo, int(maxv) + step, step))
+            return ticks
 
-    st.plotly_chart(fig, use_container_width=True)
+        ticks = yr_labels(x_min, x_max, int(bin_step))
+        ticktext = [format_year_label(t) for t in ticks]
 
-    # ---------------- PDF export (try to include chart image) ----------------
-    st.subheader("Exporteer PDF")
-    warn_box = st.empty()
+        fig.update_layout(
+            barmode='stack',
+            xaxis=dict(range=[x_min, x_max], tickvals=ticks, ticktext=ticktext, title='Calibrated calendar years (BCE/CE)'),
+            yaxis=dict(autorange='reversed'),  # keep oldest at top
+            margin=dict(l=200, r=40, t=40, b=80),
+            height=600
+        )
 
-    try:
-        # Try to export chart image (may fail on cloud due to missing Chromium)
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
+        # Display figure
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Build export PDF: figure -> PNG via kaleido, then compose PDF with table
+        try:
+            # require kaleido installed
+            png_bytes = fig.to_image(format="png", engine="kaleido")
+            # Build table for PDF from parsed_df with selected columns (show original calibrated range)
+            pdf_buffer = io.BytesIO()
+            doc = SimpleDocTemplate(pdf_buffer, pagesize=landscape(A4))
+            elements = []
+            styles = getSampleStyleSheet()
+            elements.append(Paragraph("Calibrated ranges — export", styles['Title']))
+            elements.append(Spacer(1, 12))
+            # add image
+            img = Image(io.BytesIO(png_bytes))
+            img._restrictSize(1000, 400)
+            elements.append(img)
+            elements.append(Spacer(1, 12))
+            # prepare table data
+            table_data = [["Sample name", "Lab.no.", "14C date (BP)", "1σ", "Calibrated date (2σ)", "Context"]]
+            for _, r in parsed_df.iterrows():
+                table_data.append([
+                    r["Sample name"],
+                    r["Lab.no."],
+                    r["14C date (BP)"],
+                    r["1σ"],
+                    r["raw_range"],
+                    r["Context"]
+                ])
+            tbl = Table(table_data, repeatRows=1, hAlign='LEFT')
+            tbl.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold')
+            ]))
+            elements.append(tbl)
+            doc.build(elements)
+            pdf_bytes = pdf_buffer.getvalue()
+            st.success("PDF gereed — klik download hieronder.")
+            st.download_button("Download PDF (fig + tabel)", data=pdf_bytes, file_name="calibrated_ranges_export.pdf", mime="application/pdf")
+        except Exception as e:
+            st.error(f"PDF-export faalde: {e}")
+            # fallback: allow downloading plot as PNG
             try:
-                fig.write_image(tmp_img.name, format="png", scale=2)
-                tmp_img.flush()
-                img_path = tmp_img.name
-                can_include_image = True
-            except Exception as e_img:
-                can_include_image = False
-                img_path = None
-        # Build PDF (with or without image)
-        pdf_buffer = io.BytesIO()
-        c = canvas.Canvas(pdf_buffer, pagesize=A4)
-        W, H = A4
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(40, H-50, "Radiocarbon Report")
-        c.setFont("Helvetica", 10)
-        c.drawString(40, H-70, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-        if can_include_image and img_path:
-            # draw image
-            img_reader = ImageReader(img_path)
-            # keep margins
-            c.drawImage(img_reader, 40, H-380, width=W-80, height=300, preserveAspectRatio=True)
-            # remove temp file
-            try:
-                os.unlink(img_path)
+                png_bytes = fig.to_image(format="png", engine="kaleido")
+                st.download_button("Download plot PNG", data=png_bytes, file_name="plot.png", mime="image/png")
             except Exception:
-                pass
-            table_y_start = H-400
-        else:
-            warn_box.warning("Grafiekbeeld kon niet gerenderd worden in deze (online) omgeving. PDF bevat alleen de tabel.")
-            table_y_start = H-80
+                st.warning("Kaleido niet beschikbaar — installeer 'kaleido' om PNG/PDF export te kunnen gebruiken.")
 
-        # write table starting at table_y_start
-        c.setFont("Helvetica-Bold", 10)
-        cols = ["Sample name", "Lab. no.", "14C date (BP)", "Gekalibreerd (2σ)"]
-        x_positions = [40, 220, 360, 480]
-        y = table_y_start
-        for i, col in enumerate(cols):
-            c.drawString(x_positions[i], y, col)
-        c.setFont("Helvetica", 10)
-        y -= 16
-        for _, r in data.iterrows():
-            if y < 40:
-                c.showPage()
-                c.setFont("Helvetica", 10)
-                y = H-60
-            c.drawString(x_positions[0], y, str(r.get("Sample name","")))
-            c.drawString(x_positions[1], y, str(r.get("Lab. no.","")))
-            c.drawString(x_positions[2], y, str(r.get("14C date (BP)","")))
-            c.drawString(x_positions[3], y, str(r.get("Gekalibreerd (2σ)","")))
-            y -= 14
-        c.showPage()
-        c.save()
-        pdf_buffer.seek(0)
+# Utility to format tick labels nicely (BCE/CE)
+def format_year_label(y: int) -> str:
+    y = int(y)
+    if y > 0:
+        return f"{y} CE"
+    if y == 0:
+        return "1 BCE/CE"
+    return f"{abs(y)} BCE"
 
-        st.download_button("Download PDF-rapport", data=pdf_buffer, file_name="radiocarbon_report.pdf", mime="application/pdf")
-    except Exception as e:
-        # total fallback: only table as CSV
-        warn_box.warning("Kon geen PDF maken (omgeving beperkt). Download de CSV als alternatief.")
-        csvbuf = data.to_csv(index=False).encode("utf-8")
-        st.download_button("Download dataset (CSV)", data=csvbuf, file_name="radiocarbon_data.csv", mime="text/csv")
-
-# ---------------- always allow CSV download ----------------
-if not data.empty:
-    csvbuf = data.to_csv(index=False).encode("utf-8")
-    st.download_button("Download dataset (CSV)", data=csvbuf, file_name="radiocarbon_data.csv", mime="text/csv")
-
-st.markdown("""
----
-**Notities**
-- Zorg dat `intcal20.csv` in de repo root staat.  
-- PDF bevat grafiek + tabel **lokaal**; op Streamlit Cloud wordt grafiekbeeld vaak niet gegenereerd (Kaleido/Chromium ontbreekt) — in dat geval produceert de PDF een tabel-only fallback en is er een waarschuwing.  
-""")
+# We used format_year_label inside plotly hover -> put function available
+def format_year_label_public(y):
+    return format_year_label(y)
