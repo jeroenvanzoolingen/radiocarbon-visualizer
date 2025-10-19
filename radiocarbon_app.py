@@ -4,6 +4,12 @@ import numpy as np
 import re
 import pdfplumber
 import plotly.graph_objects as go
+from datetime import datetime
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+import io
+import tempfile
 
 st.set_page_config(page_title="Radiocarbon Visualizer – OxCal-stijl", layout="wide")
 
@@ -70,25 +76,27 @@ def format_bc_ad(ad_year):
     else:
         return f"{int(ad_year)} AD"
 
+# ---------- Datasetbeheer ----------
+if "data" not in st.session_state:
+    st.session_state["data"] = pd.DataFrame(columns=["Sample name", "Lab. no.", "14C date (BP)", "BP", "Error"])
+
 # ---------- Upload & invoer ----------
 uploaded_file = st.file_uploader("📄 Upload Excel- of PDF-bestand", type=["xlsx", "xls", "pdf"])
-data = pd.DataFrame(columns=["Sample name", "Lab. no.", "14C date (BP)", "BP", "Error"])
-
 if uploaded_file is not None:
     if uploaded_file.name.lower().endswith(".pdf"):
         df = parse_pdf(uploaded_file)
     else:
         df = pd.read_excel(uploaded_file)
     df["BP"], df["Error"] = zip(*df["14C date (BP)"].map(parse_bp_value))
-    data = pd.concat([data, df], ignore_index=True)
+    st.session_state["data"] = pd.concat([st.session_state["data"], df], ignore_index=True)
 
 st.subheader("✏️ Handmatige invoer")
-with st.form("manual_entry"):
+with st.form("manual_entry", clear_on_submit=True):
     c1, c2, c3 = st.columns(3)
     sample = c1.text_input("Sample name")
     lab = c2.text_input("Lab. no.")
     raw_date = c3.text_input("14C date (BP)", placeholder="bijv. 510 ± 30")
-    add = st.form_submit_button("Voeg toe")
+    add = st.form_submit_button("➕ Voeg toe")
     if add and sample and lab and raw_date:
         bp, err = parse_bp_value(raw_date)
         if bp is None or err is None:
@@ -96,7 +104,9 @@ with st.form("manual_entry"):
         else:
             new = {"Sample name": sample, "Lab. no.": lab,
                    "14C date (BP)": raw_date, "BP": bp, "Error": err}
-            data = pd.concat([data, pd.DataFrame([new])], ignore_index=True)
+            st.session_state["data"] = pd.concat([st.session_state["data"], pd.DataFrame([new])], ignore_index=True)
+
+data = st.session_state["data"]
 
 # ---------- Tabel ----------
 st.subheader("📋 Samengestelde dataset")
@@ -173,6 +183,45 @@ if not data.empty:
 
     st.plotly_chart(fig, use_container_width=True)
 
+    # ---------- PDF Export ----------
+    st.subheader("📤 Exporteer resultaten")
+    pdf_buffer = io.BytesIO()
+
+    with tempfile.NamedTemporaryFile(suffix=".png") as tmp_img:
+        fig.write_image(tmp_img.name, format="png", scale=2)
+        tmp_img.seek(0)
+        c = canvas.Canvas(pdf_buffer, pagesize=A4)
+        c.setTitle("Radiocarbon Visual Report")
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(50, 810, "Radiocarbon Dating Visual Report")
+        c.setFont("Helvetica", 10)
+        c.drawString(50, 795, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        c.drawImage(ImageReader(tmp_img.name), 40, 340, width=520, height=400, preserveAspectRatio=True)
+
+        # tabel
+        text_y = 320
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(50, text_y, "Sample name")
+        c.drawString(180, text_y, "Lab. no.")
+        c.drawString(300, text_y, "14C date (BP)")
+        c.setFont("Helvetica", 10)
+        for _, row in data.iterrows():
+            text_y -= 14
+            c.drawString(50, text_y, str(row["Sample name"]))
+            c.drawString(180, text_y, str(row["Lab. no."]))
+            c.drawString(300, text_y, str(row["14C date (BP)"]))
+
+        c.showPage()
+        c.save()
+        pdf_buffer.seek(0)
+
+    st.download_button(
+        label="📄 Download als PDF-rapport",
+        data=pdf_buffer,
+        file_name="radiocarbon_report.pdf",
+        mime="application/pdf"
+    )
+
 # ---------- Download ----------
 if not data.empty:
     out = data.to_csv(index=False).encode("utf-8")
@@ -181,6 +230,7 @@ if not data.empty:
 
 st.markdown("""
 ---
-🧪 *De tijdas toont nu kalenderjaren (BC/AD) in stappen van 100 jaar,  
-met ±50 jaar marge voor een prettigere layout.*
+🧪 *Meervoudige handmatige invoer toegevoegd.*  
+📈 *Export als PDF bevat nu grafiek + tabel in één rapport.*  
+🔍 *Zoom, pan en reset beschikbaar via de Plotly grafiektools.*
 """)
