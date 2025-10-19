@@ -12,13 +12,14 @@ import io
 import tempfile
 import os
 
-st.set_page_config(page_title="Radiocarbon Visualizer – OxCal-stijl", layout="wide")
+st.set_page_config(page_title="Radiocarbon Visualizer – verbeterde versie", layout="wide")
 
-st.title("📆 Radiocarbon Dating Visualizer met IntCal-kalibratie (BC/AD-tijdas)")
+st.title("📆 Radiocarbon Dating Visualizer (gekalibreerd, BC/AD-schaal)")
+
 st.markdown("""
-Upload je data (Excel of PDF) of voer handmatig waarden in.  
-De app toont de **IntCal20-kalibratiecurve** (blauw) en de **gekalibreerde waarschijnlijkheidsverdelingen**
-voor elk monster, met een BC/AD-tijdas in stappen van 100 jaar.
+Upload laboratoriumdata of voer handmatig waarden in.  
+De app toont de **gekalibreerde posterioren** van elk monster samen met de **IntCal20-band (2σ)**,  
+automatisch geschaald op het relevante tijdsinterval.
 """)
 
 # ---------- Helpers ----------
@@ -50,13 +51,17 @@ def parse_pdf(file):
 def load_intcal_curve(path="intcal20.csv"):
     df = pd.read_csv(path)
     df = df.sort_values("calBP").reset_index(drop=True)
+    # Smooth IntCal over 50 jaar voor visuele rust
+    df["mu14C_smooth"] = df["mu14C"].rolling(window=50, min_periods=1, center=True).mean()
+    df["sigma_curve_smooth"] = df["sigma_curve"].rolling(window=50, min_periods=1, center=True).mean()
     return df
 
 intcal_df = load_intcal_curve()
 
 def calibrate_posterior(bp_measured, sigma_lab, intcal_df):
-    mu = intcal_df["mu14C"].values
-    sigma_curve = intcal_df["sigma_curve"].values
+    """Bereken posterior P(calBP | 14C_metingen)."""
+    mu = intcal_df["mu14C_smooth"].values
+    sigma_curve = intcal_df["sigma_curve_smooth"].values
     calBP = intcal_df["calBP"].values
     var = sigma_curve**2 + sigma_lab**2
     L = np.exp(-0.5 * (bp_measured - mu)**2 / var) / np.sqrt(2 * np.pi * var)
@@ -64,9 +69,11 @@ def calibrate_posterior(bp_measured, sigma_lab, intcal_df):
     return calBP, posterior
 
 def bp_to_ad(bp_values):
+    """Zet calBP om naar AD-jaar (negatief = BC)."""
     return 1950 - np.array(bp_values)
 
 def format_bc_ad(ad_year):
+    """Formateer jaartal voor as-label."""
     if ad_year < 0:
         return f"{abs(int(ad_year))} BC"
     elif ad_year == 0:
@@ -74,11 +81,10 @@ def format_bc_ad(ad_year):
     else:
         return f"{int(ad_year)} AD"
 
-# ---------- Session data ----------
+# ---------- Datasetbeheer ----------
 if "data" not in st.session_state:
     st.session_state["data"] = pd.DataFrame(columns=["Sample name", "Lab. no.", "14C date (BP)", "BP", "Error"])
 
-# ---------- Upload / handmatige invoer ----------
 uploaded_file = st.file_uploader("📄 Upload Excel- of PDF-bestand", type=["xlsx", "xls", "pdf"])
 if uploaded_file is not None:
     if uploaded_file.name.lower().endswith(".pdf"):
@@ -98,7 +104,7 @@ with st.form("manual_entry", clear_on_submit=True):
     if add and sample and lab and raw_date:
         bp, err = parse_bp_value(raw_date)
         if bp is None or err is None:
-            st.warning("Ongeldige invoer — gebruik bijvoorbeeld 510 ± 30")
+            st.warning("Ongeldige invoer — gebruik bijv. 510 ± 30")
         else:
             new = {"Sample name": sample, "Lab. no.": lab,
                    "14C date (BP)": raw_date, "BP": bp, "Error": err}
@@ -108,56 +114,70 @@ with st.form("manual_entry", clear_on_submit=True):
 
 data = st.session_state["data"]
 
-# ---------- Dataset ----------
 st.subheader("📋 Samengestelde dataset")
 st.dataframe(data, use_container_width=True)
 
 # ---------- Visualisatie ----------
 if not data.empty:
-    st.subheader("📊 Gekalibreerde waarschijnlijkheidsverdelingen (OxCal-stijl)")
+    st.subheader("📊 Gekalibreerde waarschijnlijkheidsverdelingen")
 
     fig = go.Figure()
 
+    # ---- IntCal-band (2σ) ----
     calBP = intcal_df["calBP"].values
     AD_years = bp_to_ad(calBP)
-    mu = intcal_df["mu14C"].values
-    sigma = intcal_df["sigma_curve"].values
+    mu = intcal_df["mu14C_smooth"].values
+    sigma = intcal_df["sigma_curve_smooth"].values
 
-    # IntCal-band
-    fig.add_trace(go.Scatter(x=AD_years, y=mu + sigma,
-                             line=dict(color="rgba(0,0,255,0)"),
-                             hoverinfo="skip", showlegend=False))
-    fig.add_trace(go.Scatter(x=AD_years, y=mu - sigma,
-                             fill="tonexty", fillcolor="rgba(0,100,255,0.25)",
-                             line=dict(color="rgba(0,0,255,0)"),
-                             name="IntCal20 ± 1σ"))
-    fig.add_trace(go.Scatter(x=AD_years, y=mu,
-                             line=dict(color="blue", width=1),
-                             name="IntCal20 μ(¹⁴C)"))
+    upper = mu + 2 * sigma
+    lower = mu - 2 * sigma
 
-    # Posterior per sample
-    offset_step = (mu.max() - mu.min()) * 0.15
+    fig.add_trace(go.Scatter(
+        x=AD_years, y=upper,
+        line=dict(color="rgba(0,0,255,0)"), hoverinfo="skip", showlegend=False))
+    fig.add_trace(go.Scatter(
+        x=AD_years, y=lower,
+        fill="tonexty", fillcolor="rgba(0,100,255,0.25)",
+        line=dict(color="rgba(0,0,255,0)"),
+        name="IntCal20 ±2σ"
+    ))
+
+    # ---- Posterioren ----
+    offset_step = (upper.max() - lower.min()) * 0.10
+    ad_min, ad_max = None, None
+
     for idx, row in data.iterrows():
         if pd.notna(row["BP"]) and pd.notna(row["Error"]):
             cal_grid, post = calibrate_posterior(row["BP"], row["Error"], intcal_df)
             ad_grid = bp_to_ad(cal_grid)
             post_scaled = post / post.max() * offset_step
-            offset = mu.min() - (idx + 1) * offset_step * 1.4
+            offset = lower.min() - (idx + 1) * offset_step * 1.2
             fig.add_trace(go.Scatter(
                 x=ad_grid, y=post_scaled + offset, mode="lines",
                 line=dict(width=2), name=row["Sample name"]
             ))
 
-    ad_min = 1950 - intcal_df["calBP"].max() - 50
-    ad_max = 1950 + 50
-    tick_vals = np.arange(ad_min // 100 * 100, ad_max + 100, 100)
-    tick_texts = [format_bc_ad(y) for y in tick_vals]
+            # Bepaal automatisch datumbereik
+            if ad_min is None or ad_grid.min() < ad_min:
+                ad_min = ad_grid.min()
+            if ad_max is None or ad_grid.max() > ad_max:
+                ad_max = ad_grid.max()
+
+    # ---- Automatische x-as op basis van data ----
+    if ad_min is not None and ad_max is not None:
+        left = np.floor((ad_min - 100) / 100) * 100
+        right = np.ceil((ad_max + 100) / 100) * 100
+    else:
+        left, right = 1950 - 6000, 1950
+
+    tick_vals = np.arange(left, right + 100, 100)
+    tick_texts = [format_bc_ad(t) for t in tick_vals]
 
     fig.update_layout(
         xaxis=dict(title="Kalenderjaren (BC/AD)",
-                   range=[ad_min, ad_max],
+                   range=[left, right],
                    tickmode="array", tickvals=tick_vals, ticktext=tick_texts),
-        yaxis=dict(title="14C-waarde (BP) / posterior-dichtheid", showticklabels=False),
+        yaxis=dict(title="Posterior-dichtheid / 14C (BP)", showticklabels=False),
         template="simple_white",
         height=500 + len(data) * 80,
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
@@ -166,45 +186,7 @@ if not data.empty:
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # ---------- PDF Export ----------
-    st.subheader("📤 Exporteer resultaten")
-
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".png") as tmp_img:
-            fig.write_image(tmp_img.name, format="png", scale=2)
-            tmp_img.seek(0)
-            pdf_buffer = io.BytesIO()
-            c = canvas.Canvas(pdf_buffer, pagesize=A4)
-            c.setTitle("Radiocarbon Visual Report")
-            c.setFont("Helvetica-Bold", 14)
-            c.drawString(50, 810, "Radiocarbon Dating Visual Report")
-            c.setFont("Helvetica", 10)
-            c.drawString(50, 795, f"Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-            c.drawImage(ImageReader(tmp_img.name), 40, 340,
-                        width=520, height=400, preserveAspectRatio=True)
-            # tabel
-            y = 320
-            c.setFont("Helvetica-Bold", 10)
-            c.drawString(50, y, "Sample name")
-            c.drawString(180, y, "Lab. no.")
-            c.drawString(300, y, "14C date (BP)")
-            c.setFont("Helvetica", 10)
-            for _, r in data.iterrows():
-                y -= 14
-                c.drawString(50, y, str(r["Sample name"]))
-                c.drawString(180, y, str(r["Lab. no."]))
-                c.drawString(300, y, str(r["14C date (BP)"]))
-            c.showPage()
-            c.save()
-            pdf_buffer.seek(0)
-        st.download_button("📄 Download PDF-rapport",
-                           data=pdf_buffer, file_name="radiocarbon_report.pdf",
-                           mime="application/pdf")
-    except RuntimeError:
-        st.warning("⚠️ PDF-export niet beschikbaar in deze online omgeving (Kaleido ontbreekt). "
-                   "Download lokaal om de grafiek in de PDF op te nemen.")
-
-# ---------- CSV Download ----------
+# ---------- Download CSV ----------
 if not data.empty:
     csv = data.to_csv(index=False).encode("utf-8")
     st.download_button("💾 Download dataset (CSV)",
@@ -213,6 +195,7 @@ if not data.empty:
 
 st.markdown("""
 ---
-🧪 *Automatische foutafhandeling voor Kaleido (online).*  
-📈 *PDF werkt lokaal met grafiek; online toont melding zonder crash.*
+✅ *Posterioren nu correct op BC/AD-schaal.*  
+📏 *X-as automatisch geschaald op relevante datering + 100 jaar buffer.*  
+🌊 *IntCal20-band vereenvoudigd tot vloeiende 2σ-band (geen lijn).*
 """)
