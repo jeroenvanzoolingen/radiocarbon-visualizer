@@ -4,15 +4,22 @@ import numpy as np
 import re
 import pdfplumber
 import plotly.graph_objects as go
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+import io
+import tempfile
+import os
 
-st.set_page_config(page_title="Radiocarbon Visualizer – verbeterde layout", layout="wide")
+st.set_page_config(page_title="Radiocarbon Visualizer – PDF export", layout="wide")
 
-st.title("📆 Radiocarbon Visualizer (BC/AD – IntCal + samples)")
+st.title("📆 Radiocarbon Visualizer (BC/AD – IntCal + samples + PDF export)")
 
 st.markdown("""
 Upload een Excel of PDF met radiokoolstofdata.  
-De app toont de **IntCal20-kalibratiecurve (2σ-band + gemiddelde lijn)** en  
-de **gekalibreerde dateringen (2σ)** op een correcte BC/AD-schaal.
+De app toont de **IntCal20-kalibratiecurve** (2σ-band + gemiddelde lijn)  
+en de **gekalibreerde dateringen (2σ)** op een correcte BC/AD-schaal.  
+Je kunt daarna een PDF-rapport downloaden met grafiek + tabel.
 """)
 
 # ---------- Helpers ----------
@@ -52,8 +59,7 @@ def format_bc_ad(y):
 
 @st.cache_data
 def load_intcal_curve():
-    url = "https://raw.githubusercontent.com/antiquist/intcal20/main/intcal20.csv"
-    df = pd.read_csv(url)
+    df = pd.read_csv("intcal20.csv")  # <-- lokaal bestand in repo
     df["mu14C_smooth"] = df["mu14C"].rolling(window=50, center=True, min_periods=1).mean()
     df["sigma_smooth"] = df["sigma_curve"].rolling(window=50, center=True, min_periods=1).mean()
     df["calAD"] = 1950 - df["calBP"]
@@ -70,7 +76,7 @@ if "data" not in st.session_state:
 uploaded_file = st.file_uploader("📄 Upload Excel- of PDF-bestand", type=["xlsx", "xls", "pdf"])
 if uploaded_file is not None:
     if uploaded_file.name.lower().endswith(".pdf"):
-        st.warning("PDF-parse nog niet volledig geïmplementeerd, gebruik Excel voor nu.")
+        st.warning("PDF-parse nog niet volledig geïmplementeerd, gebruik voorlopig Excel.")
     else:
         df = pd.read_excel(uploaded_file)
         if "14C date (BP)" in df.columns:
@@ -156,3 +162,45 @@ if not data.empty:
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
+    # ---------- PDF Export ----------
+    pdf_buffer = io.BytesIO()
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
+        fig.write_image(tmp_img.name, format="png", scale=2)
+        img_path = tmp_img.name
+
+    c = canvas.Canvas(pdf_buffer, pagesize=A4)
+    width, height = A4
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(40, height-50, "Radiocarbon Report")
+
+    # Plot als afbeelding
+    c.drawImage(ImageReader(img_path), 40, 250, width-80, 300, preserveAspectRatio=True)
+
+    # Tabel (alleen de belangrijkste kolommen)
+    c.setFont("Helvetica", 10)
+    y = 230
+    for i, row in data.iterrows():
+        line = f"{row.get('Sample name','')} | {row.get('Lab. no.','')} | {row.get('14C date (BP)','')} | {row.get('Gekalibreerd (2σ)','')}"
+        c.drawString(40, y, line[:100])  # trunc naar max breedte
+        y -= 14
+        if y < 40:
+            c.showPage()
+            c.setFont("Helvetica", 10)
+            y = height-60
+    c.save()
+    pdf_buffer.seek(0)
+    os.unlink(img_path)
+
+    st.download_button(
+        "📄 Download rapport (PDF)",
+        data=pdf_buffer,
+        file_name="radiocarbon_report.pdf",
+        mime="application/pdf"
+    )
+
+st.markdown("""
+---
+✅ IntCal20 wordt nu lokaal ingelezen (geen internet nodig).  
+📄 Nieuw: download een PDF-rapport met grafiek + tabel.  
+""")
